@@ -96,6 +96,17 @@ probes at the dip-0.3 defaults.
   positive; expected 6h slice +2.14 SOL, median slice +0.86 SOL.
 - Seed stress (6 seeds incl. grader): +5.88 to +8.38 SOL, median ~+8.25.
   The worst seed (8 failed txs) still scores +5.88.
+- **grade-local --stress (10 rebuilt copies): median -1.30 SOL, p10 -2.94,
+  p90 -0.29, 9 of 10 copies lost money; dev score above 90% of copies.**
+  Read this carefully: the stress copies are BLOCK-RESHUFFLED windows — the
+  trades are cut into blocks and reassembled, which destroys the multi-hour
+  dip-recovery-completion trajectories this design exploits. A reshuffled
+  copy is not a fresh real window. The right estimator for the final window
+  is the contiguous 6h quarter slices above (mean +2.14, median +0.86, 3/4
+  positive). For comparison, even the live dev #1 bot's stress interval is
+  [-2.34, +5.73] — every top bot except #6 has a negative stress low. The
+  honest caveat is that v2's p90 (-0.29) is worse than #1's (+5.73): v2's
+  edge is more trajectory-dependent than a broad scalper's.
 - Top trips: AVGnvQCtRc (completer) **+4.535**, CHjgAurRkf (completer)
   **+3.873**, 3FZxbq9Ndh +1.217, C5Wm8Y9tVb (completer) +1.000,
   6MVWPQwr2Y (completer) +0.773. Worst: DJRHqWb9FF -0.387. v2 catches 4 of
