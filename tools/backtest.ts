@@ -1,16 +1,19 @@
 // Offline backtest of strategy.ts on the kit's dev window with the kit's local engine
 // port (baselines/pilot/momentum/tools/sim.ts). Dev tooling only; the grader never runs it.
 //
-//   node tools/backtest.ts <kit dir> ['{"takeProfit":0.6}'] [--trips] [--slice N]
+//   node tools/backtest.ts <kit dir> ['{"dipDepth":0.25}'] [--trips] [--slice N]
 //
 // --slice N runs only the Nth quarter of the batches (0-3): a 6h proxy of the 24h dev
 // window, used to check the knobs hold up on a 6h slice before trusting them.
 //
+// Uses tools/dataset-full.ts (ALL dataset parts) — the kit sim's loadDataset reads
+// only part-00000, which is how v1's sweep (+0.172 SOL) missed the real -1.138 SOL.
+//
 // Prints net PnL, fills, coins, drawdown and reject reasons; --trips lists every round trip.
 
 import { createStrategy, DEFAULT_PARAMS, type Params } from '../strategy.ts';
+import { loadFullDataset } from './dataset-full.ts';
 import {
-  loadDataset,
   makeHello,
   phaseSeed,
   simulate,
@@ -25,7 +28,7 @@ if (kit === undefined) {
 const overrides = process.argv[3] !== undefined && process.argv[3].startsWith('{') ? (JSON.parse(process.argv[3]) as Partial<Params>) : {};
 const sliceArg = process.argv.indexOf('--slice');
 const slice = sliceArg >= 0 ? Number(process.argv[sliceArg + 1]) : -1;
-const full = loadDataset(kit);
+const full = loadFullDataset(kit);
 let ds: Dataset = full;
 if (slice >= 0 && slice < 4) {
   const n = full.batches.length;

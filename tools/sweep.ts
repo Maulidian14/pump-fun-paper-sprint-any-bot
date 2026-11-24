@@ -5,11 +5,13 @@
 //
 // Prints one line per variant: net PnL on the full window and on each 6h quarter
 // slice, so a knob is only adopted when it is good on the full window AND flat
-// across slices (the final window is unseen 6h data).
+// across slices (the final window is unseen 6h data). Uses tools/dataset-full.ts
+// (ALL dataset parts) — never the kit sim's loadDataset, which reads only
+// part-00000 and is how v1's sweep misled us.
 
 import { createStrategy, DEFAULT_PARAMS, type Params } from '../strategy.ts';
+import { loadFullDataset } from './dataset-full.ts';
 import {
-  loadDataset,
   makeHello,
   phaseSeed,
   simulate,
@@ -21,7 +23,7 @@ if (kit === undefined) {
   console.error('usage: node tools/sweep.ts <kit dir>');
   process.exit(2);
 }
-const full = loadDataset(kit);
+const full = loadFullDataset(kit);
 const hello = makeHello(phaseSeed('pilot-pumpfun-replay', 'dev', full.sha256));
 const sol = (x: bigint) => Number(x) / 1e9;
 
@@ -66,15 +68,15 @@ function run(p: Params): { net: number; dd: number; trips: number; wins: number;
 }
 
 const variants: Array<[string, Partial<Params>]> = [
-  ['tp1.0', { takeProfit: 1.0 }],
-  ['tp1.0+maxRise0.4', { takeProfit: 1.0, maxRise: 0.4 }],
-  ['tp1.0+maxRise0.3', { takeProfit: 1.0, maxRise: 0.3 }],
-  ['tp1.0+maxRise0.5', { takeProfit: 1.0, maxRise: 0.5 }],
-  ['tp0.8+maxRise0.4', { takeProfit: 0.8, maxRise: 0.4 }],
-  ['tp1.5+maxRise0.4', { takeProfit: 1.5, maxRise: 0.4 }],
-  ['tp1.0+maxRise0.4+trail0.25', { takeProfit: 1.0, maxRise: 0.4, trail: 0.25 }],
-  ['tp1.0+maxRise0.4+hold1200', { takeProfit: 1.0, maxRise: 0.4, maxHold: 1200 }],
-  ['tp1.0+maxRise0.4+net0.5', { takeProfit: 1.0, maxRise: 0.4, minNetSol: 0.5 }],
+  ['defaults (dip0.2/buy25/trail0.35/stake4)', {}],
+  ['dip0.15', { dipDepth: 0.15 }],
+  ['dip0.25', { dipDepth: 0.25 }],
+  ['dip0.3', { dipDepth: 0.3 }],
+  ['trail0.30', { trail: 0.3 }],
+  ['trail0.40', { trail: 0.4 }],
+  ['buyers50', { minBuyers: 50 }],
+  ['stake3', { stakeSol: 3 }],
+  ['recoverShare0.75', { recoverShare: 0.75 }],
 ];
 
 for (const [name, over] of variants) {
