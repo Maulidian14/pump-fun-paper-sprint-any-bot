@@ -154,6 +154,16 @@ const LAMPORTS = 1e9;
 /** Curve fees (protocol + creator) charged on each side, as a share of the quote. */
 const CURVE_FEE = 0.0125;
 const BPS_PER_UNIT = 10_000;
+/** Sells always go out wide open: the full 10,000 bps of slippage. */
+const SELL_SLIP_BPS = 10_000;
+/** A position past its max hold only exits while it is below this multiple of cost. */
+const MAX_HOLD_EXIT_BELOW = 1.1;
+/** Probes only open on curves holding at least this much real SOL above the minimum. */
+const PROBE_RESERVE_MARGIN = 1.5;
+/** Extra slots of trade history kept beyond the entry window. */
+const TRADE_KEEP_SLACK = 5;
+/** Sentinel for "this coin has never been exited". */
+const NEVER_EXITED = -1e12;
 
 interface Trade {
   slot: number;
@@ -185,6 +195,46 @@ interface Held {
   lastValue: number;
 }
 
+/** Mark-to-market close value of a position in SOL, after curve and tx fees. */
+function positionValue(tokens: number, vq: number, vt: number, tx: number): number {
+  return ((tokens * vq) / (vt + tokens) / LAMPORTS) * (1 - CURVE_FEE) - tx;
+}
+
+/**
+ * Exit decision for a held position, in the order the checks were written:
+ * take-profit, stop-loss, trailing stop (once armed), big sell, creator sell,
+ * then the time limit — which only fires while the position is not well up.
+ * A position already exiting stays exiting.
+ */
+function shouldExit(
+  h: Held,
+  value: number,
+  cost: number,
+  now: number,
+  bigSell: boolean,
+  creatorSold: boolean,
+  p: Params,
+): boolean {
+  if (h.exiting) return true;
+  if (value >= cost * (1 + p.takeProfit)) return true;
+  if (value < cost * (1 - p.stopLoss)) return true;
+  if (h.peakValue >= cost * (1 + p.trailArm) && value < h.peakValue * (1 - p.trail)) return true;
+  if (bigSell) return true;
+  if (creatorSold) return true;
+  if (now - h.opened > p.maxHold && value < cost * MAX_HOLD_EXIT_BELOW) return true;
+  return false;
+}
+
+/**
+ * Size a buy in SOL from the per-mint cap, the wanted size, the exposure
+ * headroom and the free cash; returns null when the result is too small to send.
+ */
+function sizeBuy(capSol: number, want: number, headroom: number, free: number, tx: number, minBuy: number): number | null {
+  let amount = Math.min(capSol, want, headroom);
+  if (amount > free - tx) amount = free - tx;
+  return amount < minBuy ? null : amount;
+}
+
 export function createStrategy(p: Params = DEFAULT_PARAMS): Bot {
   const coins = new Map<Pubkey, Coin>();
   const held = new Map<Pubkey, Held>();
@@ -195,12 +245,12 @@ export function createStrategy(p: Params = DEFAULT_PARAMS): Bot {
   const myCoins = new Set<Pubkey>();
   let firstTime: number | null = null;
   let lastTime: number | null = null;
-  const keep = p.window + 5;
+  const keep = p.window + TRADE_KEEP_SLACK;
 
   const coinOf = (mint: Pubkey): Coin => {
     let c = coins.get(mint);
     if (c === undefined) {
-      c = { created: null, creator: null, creatorSold: false, trades: [], entries: 0, lastExit: -1e12 };
+      c = { created: null, creator: null, creatorSold: false, trades: [], entries: 0, lastExit: NEVER_EXITED };
       coins.set(mint, c);
     }
     return c;
@@ -326,19 +376,12 @@ export function createStrategy(p: Params = DEFAULT_PARAMS): Bot {
         const vq = mk ? Number(mk.virtual_quote_reserves) : Number(curve.virtual_quote_reserves);
         const vt = mk ? Number(mk.virtual_token_reserves) : Number(curve.virtual_token_reserves);
         const tokens = Number(pos.token_amount);
-        const value = ((tokens * vq) / (vt + tokens) / LAMPORTS) * (1 - CURVE_FEE) - tx;
+        const value = positionValue(tokens, vq, vt, tx);
         const cost = Number(pos.cost_lamports) / LAMPORTS;
         if (value > h.peakValue) h.peakValue = value;
         h.lastValue = value;
-        let exit = h.exiting;
         const c = coinOf(mint);
-        if (!exit && value >= cost * (1 + p.takeProfit)) exit = true;
-        if (!exit && value < cost * (1 - p.stopLoss)) exit = true;
-        if (!exit && h.peakValue >= cost * (1 + p.trailArm) && value < h.peakValue * (1 - p.trail)) exit = true;
-        if (!exit && bigSell.has(mint)) exit = true;
-        if (!exit && c.creatorSold) exit = true;
-        if (!exit && now - h.opened > p.maxHold && value < cost * 1.1) exit = true;
-        if (!exit) continue;
+        if (!shouldExit(h, value, cost, now, bigSell.has(mint), c.creatorSold, p)) continue;
         h.exiting = true;
         if (pendingByMint.has(mint)) {
           let sellPending = false;
@@ -346,7 +389,7 @@ export function createStrategy(p: Params = DEFAULT_PARAMS): Bot {
           if (sellPending) continue;
         }
         if (orders.length >= cap) break;
-        orders.push({ side: 'sell', mint, token_amount: pos.token_amount, max_slippage_bps: 10_000 });
+        orders.push({ side: 'sell', mint, token_amount: pos.token_amount, max_slippage_bps: SELL_SLIP_BPS });
       }
 
       // Probe round trips: sell the whole probe as soon as its buy has landed.
@@ -359,7 +402,7 @@ export function createStrategy(p: Params = DEFAULT_PARAMS): Bot {
         }
         if (curve === undefined || curve.complete || pendingByMint.has(mint)) continue;
         if (orders.length >= cap) break;
-        orders.push({ side: 'sell', mint, token_amount: pos.token_amount, max_slippage_bps: 10_000 });
+        orders.push({ side: 'sell', mint, token_amount: pos.token_amount, max_slippage_bps: SELL_SLIP_BPS });
         if (!selling) probes.set(mint, true);
       }
 
@@ -395,9 +438,8 @@ export function createStrategy(p: Params = DEFAULT_PARAMS): Bot {
           want = Math.min(p.addBuySol, p.stakeSol - h.invested);
         }
         const capSol = Math.floor(Number(state.maxBuyLamports(mint))) / LAMPORTS;
-        let amount = Math.min(capSol, want, p.maxExposureSol - exposure);
-        if (amount > free - tx) amount = free - tx;
-        if (amount < p.minBuySol) continue;
+        const amount = sizeBuy(capSol, want, p.maxExposureSol - exposure, free, tx, p.minBuySol);
+        if (amount === null) continue;
         const lamports = BigInt(Math.floor(amount * LAMPORTS));
         orders.push({ side: 'buy', mint, quote_lamports: lamports, max_slippage_bps: p.buySlipBps });
         free -= amount + tx;
@@ -426,7 +468,7 @@ export function createStrategy(p: Params = DEFAULT_PARAMS): Bot {
             if (needCoins && !needFills && myCoins.has(mint)) continue;
             const curve = state.curves.get(mint);
             if (curve === undefined || curve.complete) continue;
-            if (Number(curve.real_quote_reserves) / LAMPORTS < minRq * 1.5) continue;
+            if (Number(curve.real_quote_reserves) / LAMPORTS < minRq * PROBE_RESERVE_MARGIN) continue;
             if (free < p.probeSol + 2 * tx) break;
             orders.push({ side: 'buy', mint, quote_lamports: BigInt(Math.floor(p.probeSol * LAMPORTS)), max_slippage_bps: p.buySlipBps });
             probes.set(mint, false);
